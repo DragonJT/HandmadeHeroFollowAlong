@@ -10,48 +10,65 @@ typedef int16_t int16;
 typedef int32_t int32;
 typedef int64_t int64;
 
-const int bytesPerPixel = 4;
 static bool running;
-static BITMAPINFO bitmapInfo;
-static void* bitmapMemory;
-static int bitmapWidth;
-static int bitmapHeight;
 
-void RenderWeirdGradient(int xOffset, int yOffset){
-    int pitch = bitmapWidth*bytesPerPixel;
-    uint8* row = (uint8*)bitmapMemory;
-    for(int y=0;y<bitmapHeight;y++){
+struct OffscreenBuffer{
+    const int bytesPerPixel = 4;
+    BITMAPINFO info;
+    void* memory;
+    int width;
+    int height;
+    int pitch;
+}; 
+
+struct WindowDimensions{
+    int width;
+    int height;
+};
+
+WindowDimensions GetWindowDimensions(HWND window){
+    WindowDimensions dimensions = {};
+    RECT clientRect;
+    GetClientRect(window, &clientRect);
+    dimensions.width = clientRect.right - clientRect.left;
+    dimensions.height = clientRect.bottom - clientRect.top;
+    return dimensions;
+}
+
+static OffscreenBuffer offscreenBuffer;
+
+void RenderWeirdGradient(OffscreenBuffer buffer, int xOffset, int yOffset){
+    uint8* row = (uint8*)buffer.memory;
+    for(int y=0;y<buffer.height;y++){
         uint32* pixel = (uint32*)row;
-        for(int x=0;x<bitmapWidth;x++){
+        for(int x=0;x<buffer.width;x++){
             uint8 blue = x+xOffset;
             uint8 green = y+yOffset;
             *pixel++ = ((green << 8) | blue);
         }
-        row+=pitch;
+        row+=buffer.pitch;
     }
 }
 
-void ResizeDIBSection(int width, int height){
-    if(bitmapMemory){
-        VirtualFree(bitmapMemory, 0, MEM_RELEASE);   
+void ResizeDIBSection(OffscreenBuffer *buffer, int width, int height){
+    if(buffer->memory){
+        VirtualFree(buffer->memory, 0, MEM_RELEASE);   
     }
-    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
-    bitmapInfo.bmiHeader.biWidth = width;
-    bitmapInfo.bmiHeader.biHeight = -height;
-    bitmapInfo.bmiHeader.biPlanes = 1;
-    bitmapInfo.bmiHeader.biBitCount = 32;
-    bitmapInfo.bmiHeader.biCompression = BI_RGB;
-    bitmapWidth = width;
-    bitmapHeight = height;
-    int bitmapMemorySize = width*height*bytesPerPixel;
-    bitmapMemory = VirtualAlloc(0, bitmapMemorySize, MEM_COMMIT, PAGE_READWRITE);
+    buffer->info.bmiHeader.biSize = sizeof(buffer->info.bmiHeader);
+    buffer->info.bmiHeader.biWidth = width;
+    buffer->info.bmiHeader.biHeight = -height;
+    buffer->info.bmiHeader.biPlanes = 1;
+    buffer->info.bmiHeader.biBitCount = 32;
+    buffer->info.bmiHeader.biCompression = BI_RGB;
+    buffer->width = width;
+    buffer->height = height;
+    int bitmapMemorySize = width*height*buffer->bytesPerPixel;
+    buffer->memory = VirtualAlloc(0, bitmapMemorySize, MEM_COMMIT, PAGE_READWRITE);
+    buffer->pitch = width*buffer->bytesPerPixel;
 }
 
-void _UpdateWindow(HDC deviceContext, RECT* clientRect, int x, int y, int width, int height){
-    //StretchDIBits(deviceContext, x, y, width, height, x, y, width, height, bitmapMemory, &bitmapInfo, DIB_RGB_COLORS, SRCCOPY);
-    int windowWidth = clientRect->right - clientRect->left;
-    int windowHeight = clientRect->bottom - clientRect->top;
-    StretchDIBits(deviceContext, 0, 0, bitmapWidth, bitmapHeight, 0, 0, windowWidth, windowHeight, bitmapMemory, &bitmapInfo, DIB_RGB_COLORS, SRCCOPY);
+void CopyBufferToWindow(OffscreenBuffer buffer, HDC deviceContext, int clientWidth, int clientHeight, int x, int y, int width, int height){
+    StretchDIBits(deviceContext, 0, 0, clientWidth, clientHeight, 0, 0, buffer.width, buffer.height, buffer.memory, &buffer.info, DIB_RGB_COLORS, SRCCOPY);
 }
 
 LRESULT MainWindowCallback(
@@ -64,11 +81,6 @@ LRESULT MainWindowCallback(
     LRESULT result = 0;
     switch(message){
         case WM_SIZE:{
-            RECT clientRect;
-            GetClientRect(window, &clientRect);
-            int width = clientRect.right - clientRect.left;
-            int height = clientRect.bottom - clientRect.top;
-            ResizeDIBSection(width, height);
         } break;
         case WM_DESTROY:{
             running = false;
@@ -88,9 +100,9 @@ LRESULT MainWindowCallback(
             int y = paint.rcPaint.top;
             int width = paint.rcPaint.right - paint.rcPaint.left;
             int height = paint.rcPaint.bottom - paint.rcPaint.top;
-            RECT clientRect;
-            GetClientRect(window, &clientRect);
-            _UpdateWindow(deviceContext,&clientRect,x,y,width,height);
+            
+            WindowDimensions dimensions = GetWindowDimensions(window);
+            CopyBufferToWindow(offscreenBuffer, deviceContext, dimensions.width, dimensions.height ,x,y,width,height);
             EndPaint(window, &paint);
         }break;
         default:{
@@ -107,11 +119,12 @@ int WinMain(
   int       showCode
 ){
     WNDCLASS windowClass = {};
-    windowClass.style = CS_OWNDC|CS_HREDRAW|CS_VREDRAW;
+    windowClass.style = CS_HREDRAW|CS_VREDRAW;
     windowClass.lpfnWndProc = MainWindowCallback;
     windowClass.hInstance = instance;
     windowClass.lpszClassName = "WindowClass";
 
+    ResizeDIBSection(&offscreenBuffer, 1280, 720);
     RegisterClass(&windowClass);
 
     HWND window = CreateWindowEx(
@@ -141,15 +154,13 @@ int WinMain(
             DispatchMessage(&message);
         }
         HDC deviceContext = GetDC(window);
-        RenderWeirdGradient(xOffset, yOffset);
-        RECT clientRect;
-        GetClientRect(window, &clientRect);
-        int width = clientRect.right - clientRect.left;
-        int height = clientRect.bottom - clientRect.top;
-        _UpdateWindow(deviceContext,&clientRect,0,0,width,height);
+        RenderWeirdGradient(offscreenBuffer, xOffset, yOffset);
+        WindowDimensions dimensions = GetWindowDimensions(window);
+        CopyBufferToWindow(offscreenBuffer,deviceContext,dimensions.width,dimensions.height,0,0,dimensions.width,dimensions.height);
         ReleaseDC(window, deviceContext);
 
         xOffset++;
+        yOffset++;
     }
 
     return 0;
